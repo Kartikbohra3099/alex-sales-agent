@@ -673,6 +673,56 @@ textarea.form-control {
 
 .send-btn:hover { opacity: 0.85; }
 
+.attach-btn {
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: var(--surface3);
+  color: var(--text2);
+  font-size: 15px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all .2s;
+}
+
+.attach-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.chat-input-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface3);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.file-chip-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.file-chip-remove {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 0 2px;
+}
+
+.file-chip-remove:hover { color: var(--red); }
+
 /* scrollbar */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -712,6 +762,7 @@ textarea.form-control {
         <button class="mode-btn" onclick="setMode('simulate',this)">Simulate call</button>
         <button class="mode-btn" onclick="setMode('objection',this)">Objections</button>
       </div>
+      <button class="icon-btn" onclick="goBack()" title="Back"><i class="ti ti-arrow-left"></i></button>
       <button class="icon-btn" onclick="clearChat()" title="New chat"><i class="ti ti-plus"></i></button>
       <button class="icon-btn" onclick="resetKey()" title="Change API key"><i class="ti ti-key"></i></button>
     </div>
@@ -800,8 +851,17 @@ textarea.form-control {
       </div>
 
       <div class="input-bar">
-        <textarea class="chat-input" id="chat-input" placeholder="Ask Alex anything about your campaign…" rows="1"
-          onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <input type="file" id="file-input" multiple
+          accept="image/*,application/pdf,text/plain,text/csv,.csv,.txt,.md,.json"
+          style="display:none" onchange="handleFileSelect(event)">
+        <button class="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach file">
+          <i class="ti ti-paperclip"></i>
+        </button>
+        <div class="chat-input-wrap">
+          <div class="file-chips" id="file-chips" style="display:none"></div>
+          <textarea class="chat-input" id="chat-input" placeholder="Ask Alex anything about your campaign…" rows="1"
+            onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        </div>
         <button class="send-btn" onclick="sendChat()"><i class="ti ti-send"></i></button>
       </div>
     </div>
@@ -875,6 +935,7 @@ let chatHistory = [];
 let isLoading = false;
 let apiKey = '';
 let currentSessionId = null;
+let attachedFiles = []; // { id, name, kind: 'image'|'document'|'text', mediaType, base64, textContent }
 
 // ─── PERSISTENCE ENGINE ───────────────────────────────────────────
 const DB = {
@@ -1044,19 +1105,123 @@ async function generate() {
   await callAI(prompt, label, true);
 }
 
+// ─── FILE ATTACHMENTS ─────────────────────────────────────────────
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleFileSelect(event) {
+  const files = Array.from(event.target.files || []);
+  const MAX_BYTES = 8 * 1024 * 1024; // 8MB per file, keeps requests reasonable
+  for (const file of files) {
+    if (file.size > MAX_BYTES) { alert(file.name + ' is too large (max 8MB).'); continue; }
+    const id = 'file_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const isImage = file.type.startsWith('image/');
+    const isPdf = file.type === 'application/pdf';
+    const isText = /^text\//.test(file.type) || /\.(txt|csv|md|json)$/i.test(file.name);
+    try {
+      if (isImage || isPdf) {
+        const base64 = await fileToBase64(file);
+        attachedFiles.push({
+          id, name: file.name, kind: isImage ? 'image' : 'document',
+          mediaType: file.type || (isPdf ? 'application/pdf' : 'application/octet-stream'),
+          base64
+        });
+      } else if (isText) {
+        const textContent = await file.text();
+        attachedFiles.push({ id, name: file.name, kind: 'text', textContent: textContent.slice(0, 20000) });
+      } else {
+        alert('Unsupported file type: ' + file.name + '. Try an image, PDF, or text/CSV file.');
+        continue;
+      }
+    } catch (e) { alert('Could not read ' + file.name); }
+  }
+  renderAttachments();
+  event.target.value = ''; // allow re-selecting the same file later
+}
+
+function removeAttachment(id) {
+  attachedFiles = attachedFiles.filter(f => f.id !== id);
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const wrap = document.getElementById('file-chips');
+  if (!attachedFiles.length) { wrap.innerHTML = ''; wrap.style.display = 'none'; return; }
+  wrap.style.display = 'flex';
+  wrap.innerHTML = attachedFiles.map(f => {
+    const icon = f.kind === 'image' ? 'ti-photo' : f.kind === 'document' ? 'ti-file-type-pdf' : 'ti-file-text';
+    return `<div class="file-chip">
+      <i class="ti ${icon}"></i>
+      <span class="file-chip-name">${escHtml(f.name)}</span>
+      <button class="file-chip-remove" onclick="removeAttachment('${f.id}')" title="Remove">×</button>
+    </div>`;
+  }).join('');
+}
+
+// Builds the content sent to the Anthropic API: a plain string if there are
+// no attachments (unchanged old behaviour), or a multipart block array if there are.
+function buildApiContent(text) {
+  if (!attachedFiles.length) return text;
+  const blocks = [];
+  if (text) blocks.push({ type: 'text', text });
+  attachedFiles.forEach(f => {
+    if (f.kind === 'image') {
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: f.mediaType, data: f.base64 } });
+    } else if (f.kind === 'document') {
+      blocks.push({ type: 'document', source: { type: 'base64', media_type: f.mediaType, data: f.base64 } });
+    } else if (f.kind === 'text') {
+      blocks.push({ type: 'text', text: '--- File: ' + f.name + ' ---\n' + f.textContent });
+    }
+  });
+  return blocks;
+}
+
+// ─── BACK NAVIGATION ──────────────────────────────────────────────
+// Returns to the welcome/empty view without deleting the current session,
+// so Kartik can back out of a chat and land somewhere neutral to start over.
+function goBack() {
+  currentSessionId = null;
+  chatHistory = [];
+  attachedFiles = [];
+  renderAttachments();
+  showEmptyState();
+  renderSidebar();
+}
+
 // ─── CHAT ─────────────────────────────────────────────────────────
 async function sendChat() {
   const el = document.getElementById('chat-input');
   const text = el.value.trim();
-  if (!text || isLoading) return;
+  if ((!text && !attachedFiles.length) || isLoading) return;
   el.value = ''; el.style.height = 'auto';
-  if (!currentSessionId) { currentSessionId = DB.create(text.slice(0,40)); renderSidebar(); }
-  chatHistory.push({ role:'user', content: text });
+  if (!currentSessionId) {
+    const title = text || (attachedFiles[0] && attachedFiles[0].name) || 'New chat';
+    currentSessionId = DB.create(title.slice(0, 40));
+    renderSidebar();
+  }
+
+  const apiContent = buildApiContent(text);
+  chatHistory.push({ role: 'user', content: apiContent });
+
+  let displayText = text;
+  if (attachedFiles.length) {
+    const tags = attachedFiles.map(f => '📎 ' + f.name).join('   ');
+    displayText = (text ? text + '\n\n' : '') + tags;
+  }
+  attachedFiles = [];
+  renderAttachments();
+
   let sfx = '';
   if (mode === 'coach') sfx = '\n\nACTIVE MODE: PITCH REFINER. Kartik will paste a pitch, talk track or email. Show ORIGINAL vs IMPROVED with one-line explanations for each change. Be specific and direct.';
   if (mode === 'simulate') sfx = '\n\nACTIVE MODE: CALL SIMULATOR. Ask which persona to play then go fully in character. Stay in character until Kartik says pause or stop roleplay. After roleplay ends give: WHAT WORKED, IMPROVE, SCORE X/10.';
   if (mode === 'objection') sfx = '\n\nACTIVE MODE: OBJECTIONS. Give exact word-for-word scripts. Format: WHAT THEY SAID / WHAT TO SAY / WHY IT WORKS / IF THEY PUSH BACK.';
-  await callAI(null, null, false, text, sfx);
+  await callAI(null, null, false, displayText, sfx);
 }
 
 function ask(text) { document.getElementById('chat-input').value = text; sendChat(); }
